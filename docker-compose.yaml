@@ -1,27 +1,81 @@
 version: '3.8'
 
 services:
-  catalog:
+  # --- Catalog Replicas ---
+  catalog1:
     build: ./catalog
+    container_name: bazar_catalog_replica_1
     ports:
-      - "4001:4001"
-
-  order:
-    build: ./order
-    ports:
-      - "4002:4002"
+      - "4001:4001"  # Matches your front.js catalogServers[0]
     environment:
-      - CATALOG_URL=http://catalog:4001
-    depends_on:
-      - catalog
+      - PORT=4001
+      - DB_FILE=catalog1.db
+      - PEER_URL=http://catalog2:4001  # For replication to other replica
+    volumes:
+      - ./catalog/db:/app/db  # Persist SQLite databases
+    networks:
+      - bazar_network
 
+  catalog2:
+    build: ./catalog
+    container_name: bazar_catalog_replica_2
+    ports:
+      - "4002:4001"  # Host port 4002, container port 4001
+    environment:
+      - PORT=4001
+      - DB_FILE=catalog2.db
+      - PEER_URL=http://catalog1:4001  # For replication to other replica
+    volumes:
+      - ./catalog/db:/app/db
+    networks:
+      - bazar_network
+
+  # --- Order Replicas ---
+  order1:
+    build: ./order
+    container_name: bazar_order_replica_1
+    ports:
+      - "5001:5001"  # Matches your front.js orderServers[0]
+    environment:
+      - PORT=5001
+      - DB_FILE=order1.db
+      - PEER_URL=http://order2:5001  # For replication to other replica
+    volumes:
+      - ./order/db:/app/db
+    networks:
+      - bazar_network
+
+  order2:
+    build: ./order
+    container_name: bazar_order_replica_2
+    ports:
+      - "5002:5001"  # Host port 5002, container port 5001
+    environment:
+      - PORT=5001
+      - DB_FILE=order2.db
+      - PEER_URL=http://order1:5001  # For replication to other replica
+    volumes:
+      - ./order/db:/app/db
+    networks:
+      - bazar_network
+
+  # --- Front-End with Cache ---
   front:
     build: ./front
+    container_name: bazar_frontend
     ports:
-      - "4000:4000"
+      - "4000:4000"  # Main access point
     environment:
-      - CATALOG_URL=http://catalog:4001
-      - ORDER_URL=http://order:4002
+      - PORT=4000
     depends_on:
-      - catalog
-      - order
+      - catalog1
+      - catalog2
+      - order1
+      - order2
+    networks:
+      - bazar_network
+
+# Network for internal communication
+networks:
+  bazar_network:
+    driver: bridge
