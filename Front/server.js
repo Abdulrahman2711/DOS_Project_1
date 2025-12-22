@@ -1,68 +1,98 @@
-// front/index.js — API Gateway (Front service)
-import express from 'express';
-import morgan from 'morgan';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import fetch from 'node-fetch';
-
-dotenv.config();
-
+const express = require("express");
+const axios = require("axios");
 const app = express();
-app.use(cors());
+
 app.use(express.json());
-app.use(morgan('dev'));
 
-const PORT = process.env.PORT || 4000;
-const CATALOG_URL = process.env.CATALOG_URL || 'http://localhost:4001';
-const ORDER_URL   = process.env.ORDER_URL   || 'http://localhost:4002';
+const PORT = 4000;
 
-// fetch helper
-async function httpJSON(url, opts = {}) {
-  const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
-  const text = await r.text();
-  let data; try { data = text ? JSON.parse(text) : null; } catch { data = null; }
-  return { ok: r.ok, status: r.status, data };
+// -------- LOAD BALANCERS ------------
+
+const catalogServers = [
+  "http://catalog1:4001",
+  "http://catalog2:4002"
+];
+
+const orderServers = [
+  "http://order1:5001",
+  "http://order2:5002"
+];
+
+let catalogIndex = 0;
+let orderIndex = 0;
+
+function nextCatalog() {
+  const s = catalogServers[catalogIndex];
+  catalogIndex = (catalogIndex + 1) % catalogServers.length;
+  return s;
 }
 
-// check
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, catalog: CATALOG_URL, order: ORDER_URL });
+function nextOrder() {
+  const s = orderServers[orderIndex];
+  orderIndex = (orderIndex + 1) % orderServers.length;
+  return s;
+}
+
+// ---------- LRU CACHE --------
+
+const cache = new Map();
+const MAX_CACHE = 50;
+
+function getCache(key) {
+  if (!cache.has(key)) return null;
+  const value = cache.get(key);
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function setCache(key, value) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > MAX_CACHE) {
+    const firstKey = cache.keys().next().value;
+    cache.delete(firstKey);
+  }
+}
+
+//------------- ROUTES ------
+
+// Catalog query (READ – cached)
+app.get("/query/:id", async (req, res) => {
+  const bookId = req.params.id;
+
+  const cached = getCache(bookId);
+  if (cached) {
+    return res.json({ source: "cache", data: cached });
+  }
+
+  try {
+    const server = nextCatalog();
+    const response = await axios.get(`${server}/query/${bookId}`);
+    setCache(bookId, response.data);
+    res.json({ source: "catalog", data: response.data });
+  } catch (err) {
+    res.status(500).send("Catalog error");
+  }
 });
 
-
- //  search/:topic  → deals with Catalog
-app.get('/search/:topic', async (req, res) => {
-  const topic = req.params.topic;
-  const r = await httpJSON(`${CATALOG_URL}/search/${encodeURIComponent(topic)}`);
-  if (!r.ok) return res.status(r.status).json(r.data ?? { error: 'Catalog error' });
-  res.json(r.data);
+// Buy book (WRITE – no cache)
+app.post("/buy", async (req, res) => {
+  try {
+    const server = nextOrder();
+    const response = await axios.post(`${server}/buy`, req.body);
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).send("Order error");
+  }
 });
 
-
-  //info/:id  → deals with Catalog
-app.get('/info/:id', async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid id' });
-
-  const r = await httpJSON(`${CATALOG_URL}/info/${id}`);
-  if (!r.ok) return res.status(r.status).json(r.data ?? { error: 'Catalog error' });
-  res.json(r.data);
-});
-
-
- // purchase/:id  → deals with Order
- 
-app.post('/purchase/:id', async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid id' });
-
-  const r = await httpJSON(`${ORDER_URL}/purchase/${id}`, { method: 'POST' });
-  if (!r.ok) return res.status(r.status).json(r.data ?? { error: 'Order error' });
-  res.status(201).json(r.data);
+// Cache invalidation (server-push)
+app.post("/invalidate/:id", (req, res) => {
+  cache.delete(req.params.id);
+  res.send("Invalidated");
 });
 
 app.listen(PORT, () => {
-  console.log(`🌐 Front service listening on http://localhost:${PORT}`);
-  console.log(`→ Catalog: ${CATALOG_URL}`);
-  console.log(`→ Order:   ${ORDER_URL}`);
+  console.log(`Front server running on port ${PORT}`);
 });
